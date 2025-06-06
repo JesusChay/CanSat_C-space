@@ -3,13 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'self' https://unpkg.com; img-src 'self' https://*.tile.openstreetmap.org https://unpkg.com; connect-src 'self';">
-  <title>Estación Terrena CANsat</title>
-  <link rel="stylesheet" href="styles.css">
+  <title>KA'AN ASTRA</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div class="banner">
@@ -18,7 +14,7 @@
       <div class="titulo-texto">KA'AN ASTRA</div>
     </div>
   </div>
-
+  
   <div class="tabs">
     <button class="tab-button active" data-tab="dashboardTab">Dashboard</button>
     <button class="tab-button" data-tab="mapTab">Mapa</button>
@@ -31,31 +27,26 @@
         <canvas id="temperatureChart"></canvas>
         <p id="tempValue">0.00°C</p>
       </div>
-
       <div class="panel">
         <h2>Humedad</h2>
         <canvas id="humidityChart"></canvas>
         <p id="humidityValue">0.00%</p>
       </div>
-
       <div class="panel">
         <h2>Presión</h2>
         <canvas id="pressureChart"></canvas>
         <p id="pressureValue">0.00 hPa</p>
       </div>
-
       <div class="panel">
         <h2>Acelerómetro</h2>
         <canvas id="accelChart"></canvas>
         <p id="accelValue">0.00 g</p>
       </div>
-
       <div class="panel">
         <h2>Altura</h2>
         <canvas id="altitudeChart"></canvas>
         <p id="altitudeValue">0.00 m</p>
       </div>
-
       <div class="panel model-panel">
         <h2>Modelo 3D</h2>
         <div id="model3d"></div>
@@ -66,12 +57,20 @@
         </div>
       </div>
     </div>
+
+    <!-- Botón para generar reporte -->
+    <div class="report-button-container">
+      <button id="generateReportBtn">Generar Reporte</button>
+    </div>
   </div>
 
   <div id="mapTab" class="tab-content">
     <div id="map"></div>
   </div>
 
-  <script src="script.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src="./script.js"></script>
 </body>
 </html>
