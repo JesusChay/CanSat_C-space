@@ -1,5 +1,12 @@
+const { app, BrowserWindow } = require('electron');
+const fs = require('fs');
+const path = require('path');
+
 console.log('Chart cargado:', Chart);
 console.log('THREE cargado:', THREE);
+
+// Arreglo para almacenar los datos simulados
+let dataLog = [];
 
 window.onload = () => {
   console.log('window.onload ejecutado');
@@ -224,6 +231,23 @@ window.onload = () => {
 
       const [temp, ax, ay, az, gx, gy, gz, humidity, pressure, altitude, lat, lon] = values;
 
+      // Almacenar datos en dataLog
+      dataLog.push({
+        time: time.toFixed(2),
+        temperature: temp.toFixed(2),
+        ax: ax.toFixed(2),
+        ay: ay.toFixed(2),
+        az: az.toFixed(2),
+        gx: gx.toFixed(2),
+        gy: gy.toFixed(2),
+        gz: gz.toFixed(2),
+        humidity: humidity.toFixed(2),
+        pressure: pressure.toFixed(2),
+        altitude: altitude.toFixed(2),
+        latitude: lat.toFixed(6),
+        longitude: lon.toFixed(6)
+      });
+
       updateSingleLine(temperatureChart, temp);
       updateSingleLine(humidityChart, humidity);
       updateSingleLine(pressureChart, pressure);
@@ -260,6 +284,86 @@ window.onload = () => {
     }
   }
 
+  // Función para generar y guardar el reporte en CSV con confirmación flotante
+  function generateCSVReport() {
+    if (dataLog.length === 0) {
+      console.log('No hay datos para generar el reporte.');
+      return;
+    }
+
+    const headers = [
+      'Tiempo (s)',
+      'Temperatura (°C)',
+      'Acelerómetro X (g)',
+      'Acelerómetro Y (g)',
+      'Acelerómetro Z (g)',
+      'Giroscopio X (rad/s)',
+      'Giroscopio Y (rad/s)',
+      'Giroscopio Z (rad/s)',
+      'Humedad (%)',
+      'Presión (hPa)',
+      'Altura (m)',
+      'Latitud',
+      'Longitud'
+    ];
+
+    const csvRows = [headers.join(',')];
+    dataLog.forEach(data => {
+      csvRows.push([
+        data.time,
+        data.temperature,
+        data.ax,
+        data.ay,
+        data.az,
+        data.gx,
+        data.gy,
+        data.gz,
+        data.humidity,
+        data.pressure,
+        data.altitude,
+        data.latitude,
+        data.longitude
+      ].join(','));
+    });
+
+    const csvContent = csvRows.join('\n');
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filePath = `C:\\Users\\User\\Desktop\\reporte-cansat-${timestamp}.csv`;
+
+    fs.writeFile(filePath, csvContent, (err) => {
+      if (err) {
+        console.error('Error al guardar el reporte CSV:', err);
+      } else {
+        console.log(`Reporte CSV guardado en: ${filePath}`);
+
+        // Crear y mostrar el mensaje flotante
+        let notification = document.createElement('div');
+        notification.style.cssText = `
+          position: fixed;
+          top: 20px;
+          right: 20px;
+          background: #4bc0c0;
+          color: white;
+          padding: 10px 20px;
+          border-radius: 5px;
+          box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+          z-index: 1000;
+          animation: fadeOut 3s forwards;
+        `;
+        notification.textContent = 'Reporte generado con éxito!';
+        document.body.appendChild(notification);
+
+        // Animación para que desaparezca después de 3 segundos
+        setTimeout(() => {
+          notification.remove();
+        }, 3000);
+      }
+    });
+  }
+
+  // Añadir el evento de clic al botón de generar reporte
+  document.getElementById('generateReportBtn').addEventListener('click', generateCSVReport);
+
   setInterval(processSimulatedData, 500);
 
   function animate() {
@@ -272,3 +376,14 @@ window.onload = () => {
 
   animate();
 };
+
+// Animación CSS para el fadeOut
+const style = document.createElement('style');
+style.textContent = `
+  @keyframes fadeOut {
+    0% { opacity: 1; }
+    90% { opacity: 1; }
+    100% { opacity: 0; }
+  }
+`;
+document.head.appendChild(style);
