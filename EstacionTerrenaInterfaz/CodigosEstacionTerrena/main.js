@@ -11,8 +11,172 @@ let primaryDataLog = [];
 let secondaryDataLog = [];
 let distanceDataLog = [];
 let simulationInterval = null;
+let simTime = 0;
 let lastPrimaryTime = null;
 let lastSecondaryTime = null;
+let lastPrimaryUpdateTime = null;
+let lastSecondaryUpdateTime = null;
+let lastPrimaryPosition = null;
+let lastSecondaryPosition = null;
+let accelBiasPrimary = { x: 0, y: 0, z: 0 };
+let accelBiasSecondary = { x: 0, y: 0, z: 0 };
+let calibrationSamplesPrimary = [];
+let calibrationSamplesSecondary = [];
+
+class Quaternion {
+    constructor(w, x, y, z) {
+        this.w = w;
+        this.x = x;
+        this.y = y;
+        this.z = z;
+    }
+
+    multiply(q) {
+        return new Quaternion(
+            this.w * q.w - this.x * q.x - this.y * q.y - this.z * q.z,
+            this.w * q.x + this.x * q.w + this.y * q.z - this.z * q.y,
+            this.w * q.y - this.x * q.z + this.y * q.w + this.z * q.x,
+            this.w * q.z + this.x * q.y - this.y * q.x + this.z * q.w
+        );
+    }
+
+    normalize() {
+        const mag = Math.sqrt(this.w * this.w + this.x * this.x + this.y * this.y + this.z * this.z);
+        if (mag < 1e-6) {
+            return new Quaternion(1, 0, 0, 0);
+        }
+        return new Quaternion(this.w / mag, this.x / mag, this.y / mag, this.z / mag);
+    }
+
+    rotateVector(v) {
+        if (v.some(isNaN)) {
+            return [0, 0, 0];
+        }
+        const qv = new Quaternion(0, v[0], v[1], v[2]);
+        const qConj = new Quaternion(this.w, -this.x, -this.y, -this.z);
+        const result = this.multiply(qv).multiply(qConj);
+        return [result.x, result.y, result.z];
+    }
+
+    update(gyrox, gyroy, gyroz, dt) {
+        if (isNaN(gyrox) || isNaN(gyroy) || isNaN(gyroz) || isNaN(dt)) {
+            return this;
+        }
+        const wx = gyrox * Math.PI / 180;
+        const wy = gyroy * Math.PI / 180;
+        const wz = gyroz * Math.PI / 180;
+        const halfDt = dt / 2;
+        const qw = 1;
+        const qx = wx * halfDt;
+        const qy = wy * halfDt;
+        const qz = wz * halfDt;
+        const deltaQ = new Quaternion(qw, qx, qy, qz).normalize();
+        return this.multiply(deltaQ).normalize();
+    }
+
+    correctYaw(yawDeg) {
+        if (isNaN(yawDeg) || yawDeg < 0 || yawDeg > 360) {
+            return this;
+        }
+        const yawRad = yawDeg * Math.PI / 180;
+        const sinYaw = Math.sin(yawRad / 2);
+        const cosYaw = Math.cos(yawRad / 2);
+        const yawQ = new Quaternion(cosYaw, 0, 0, sinYaw);
+        const alpha = 0.1;
+        return new Quaternion(
+            this.w * (1 - alpha) + yawQ.w * alpha,
+            this.x * (1 - alpha),
+            this.y * (1 - alpha),
+            this.z * (1 - alpha) + yawQ.z * alpha
+        ).normalize();
+    }
+
+    correctOrientation(accelx, accely, accelz, magy, magz) {
+        const mag = Math.sqrt(accelx * accelx + accely * accely + accelz * accelz);
+        if (mag < 1e-6) {
+            return this;
+        }
+
+        const ax = accelx / mag;
+        const ay = accely / mag;
+        const az = accelz / mag;
+
+        const pitchAccel = Math.asin(-ax);
+        const rollAccel = Math.atan2(ay, az);
+
+        let pitch = pitchAccel;
+        let roll = rollAccel;
+        if (!isNaN(magy) && magy >= -90 && magy <= 90 && !isNaN(magz) && magz >= -90 && magz <= 90) {
+            const alphaMag = 0.05;
+            pitch = pitchAccel * (1 - alphaMag) + (magy * Math.PI / 180) * alphaMag;
+            roll = rollAccel * (1 - alphaMag) + (magz * Math.PI / 180) * alphaMag;
+        }
+
+        const cp = Math.cos(pitch / 2);
+        const sp = Math.sin(pitch / 2);
+        const cr = Math.cos(roll / 2);
+        const sr = Math.sin(roll / 2);
+        const accelQ = new Quaternion(cp * cr, sp * cr, cp * sr, -sp * sr);
+
+        const alpha = 0.05;
+        return new Quaternion(
+            this.w * (1 - alpha) + accelQ.w * alpha,
+            this.x * (1 - alpha) + accelQ.x * alpha,
+            this.y * (1 - alpha) + accelQ.y * alpha,
+            this.z * (1 - alpha) + accelQ.z * alpha
+        ).normalize();
+    }
+
+    static fromAccelAndMag(accelx, accely, accelz, yawDeg) {
+        const mag = Math.sqrt(accelx * accelx + accely * accely + accelz * accelz);
+        if (mag < 1e-6) {
+            return new Quaternion(1, 0, 0, 0);
+        }
+
+        const ax = accelx / mag;
+        const ay = accely / mag;
+        const az = accelz / mag;
+
+        const pitch = Math.asin(-ax);
+        const roll = Math.atan2(ay, az);
+        const yaw = isNaN(yawDeg) || yawDeg < 0 || yawDeg > 360 ? 0 : yawDeg * Math.PI / 180;
+
+        const cp = Math.cos(pitch / 2);
+        const sp = Math.sin(pitch / 2);
+        const cr = Math.cos(roll / 2);
+        const sr = Math.sin(roll / 2);
+        const cy = Math.cos(yaw / 2);
+        const sy = Math.sin(yaw / 2);
+
+        return new Quaternion(
+            cp * cr * cy + sp * sr * sy,
+            sp * cr * cy - cp * sr * sy,
+            cp * sr * cy + sp * cr * sy,
+            cp * cr * sy - sp * sr * cy
+        ).normalize();
+    }
+
+    static fromAccel(accelx, accely, accelz) {
+        const mag = Math.sqrt(accelx * accelx + accely * accely + accelz * accelz);
+        if (mag < 1e-6) {
+            return new Quaternion(1, 0, 0, 0);
+        }
+
+        const ax = accelx / mag;
+        const ay = accely / mag;
+        const az = accelz / mag;
+
+        const pitch = Math.asin(-ax);
+        const roll = Math.atan2(ay, az);
+
+        const cp = Math.cos(pitch / 2);
+        const sp = Math.sin(pitch / 2);
+        const cr = Math.cos(roll / 2);
+        const sr = Math.sin(roll / 2);
+
+        return new Quaternion(cp * cr, sp * cr, cp * sr, -sp * sr).normalize();
+    }
+}
 
 class KalmanFilter {
     constructor() {
@@ -21,8 +185,8 @@ class KalmanFilter {
         this.A = [[1, 0], [0, 1]];
         this.B = [[0], [0]];
         this.H = [[1, 0]];
-        this.Q = [[0.01, 0], [0, 0.01]];
-        this.R = [[10]];
+        this.Q = [[0.001, 0], [0, 0.001]];
+        this.R = [[1]];
     }
 
     multiplyMatrix(A, B) {
@@ -32,7 +196,7 @@ class KalmanFilter {
             console.error('B dimensiones:', B.length, B[0] ? B[0].length : 0);
             console.error('A:', A);
             console.error('B:', B);
-            throw new Error('Dimensiones de matrices no compatibles');
+            return [[0]];
         }
         const rowsA = A.length, colsA = A[0].length, colsB = B[0].length;
         const result = Array(rowsA).fill().map(() => Array(colsB).fill(0));
@@ -51,15 +215,14 @@ class KalmanFilter {
     }
 
     inverseMatrix1x1(A) {
-        if (A[0][0] === 0) {
-            throw new Error('Matriz no invertible (división por cero)');
+        if (Math.abs(A[0][0]) < 1e-6) {
+            return [[1]];
         }
         return [[1 / A[0][0]]];
     }
 
     predict(u, dt) {
-        if (dt <= 0 || isNaN(dt)) {
-            console.warn('Dato invalido:', dt);
+        if (isNaN(u) || dt <= 0 || isNaN(dt) || dt > 1) {
             return;
         }
         this.A = [[1, dt], [0, 1]];
@@ -79,8 +242,7 @@ class KalmanFilter {
     }
 
     update(z) {
-        if (isNaN(z) || z < -1000 || z > 10000) {
-            console.warn('Medición de altura inválida:', z);
+        if (isNaN(z) || z < 0 || z > 2000) {
             return;
         }
 
@@ -103,12 +265,41 @@ class KalmanFilter {
     }
 
     getState() {
-        return { relativeAltitude: this.x[0][0], velocityZ: this.x[1][0] };
+        return {
+            relativeAltitude: Math.max(0, this.x[0][0]),
+            velocityZ: this.x[1][0]
+        };
+    }
+
+    reset() {
+        this.x = [[0], [0]];
+        this.P = [[1000, 0], [0, 1000]];
     }
 }
 
 let primaryKalman = null;
 let secondaryKalman = null;
+let primaryOrientation = new Quaternion(1, 0, 0, 0);
+let secondaryOrientation = new Quaternion(1, 0, 0, 0);
+
+function calibrateAccelerometer(accelx, accely, accelz, isPrimary) {
+    const samples = isPrimary ? calibrationSamplesPrimary : calibrationSamplesSecondary;
+    const bias = isPrimary ? accelBiasPrimary : accelBiasSecondary;
+    const maxSamples = 100;
+
+    const accelTotal = Math.sqrt(accelx * accelx + accely * accely + accelz * accelz);
+    if (Math.abs(accelTotal - 1) < 0.2) {
+        samples.push({ x: accelx, y: accely, z: accelz });
+    }
+
+    if (samples.length >= maxSamples) {
+        bias.x = samples.reduce((sum, s) => sum + s.x, 0) / samples.length;
+        bias.y = samples.reduce((sum, s) => sum + s.y, 0) / samples.length;
+        bias.z = samples.reduce((sum, s) => sum + s.z, 0) / samples.length - 1;
+        console.log(`${isPrimary ? 'Primaria' : 'Secundaria'} calibrada:`, bias);
+        samples.length = 0;
+    }
+}
 
 function createWindows() {
     dashboardWindow = new BrowserWindow({
@@ -124,12 +315,8 @@ function createWindows() {
     dashboardWindow.loadFile('dashboard.html');
 
     dashboardWindow.on('close', () => {
-        if (mapWindow) {
-            mapWindow.close();
-        }
-        if (model3dWindow) {
-            model3dWindow.close();
-        }
+        if (mapWindow) mapWindow.close();
+        if (model3dWindow) model3dWindow.close();
     });
 
     mapWindow = new BrowserWindow({
@@ -173,36 +360,55 @@ function generateRandom(min, max) {
 }
 
 function simulateData() {
+    simTime += 0.5;
+    let altitude, accelx, accely, accelz, gyrox, gyroy, gyroz, magx, magy, magz, speed;
+    let latitude = 19.6;
+    let longitude = -99.1;
+
+    if (simTime < 10) {
+        altitude = 100 * simTime;
+        accelz = 1.5;
+        speed = 3.6 * 100 / 10;
+        latitude += simTime * 0.0001;
+        longitude += simTime * 0.0001;
+    } else if (simTime < 12) {
+        altitude = 1000;
+        accelz = 1.0;
+        speed = 0;
+        latitude += 10 * 0.0001;
+        longitude += 10 * 0.0001;
+    } else if (simTime <= 30) {
+        altitude = 1000 - 50 * (simTime - 12);
+        accelz = 1.0;
+        speed = 3.6 * 50;
+        latitude += (10 + (simTime - 12) * 0.00005);
+        longitude += (10 + (simTime - 12) * 0.00005);
+    } else {
+        altitude = 0;
+        accelz = 1.0;
+        speed = 0;
+        latitude += 10 * 0.0001;
+        longitude += 10 * 0.0001;
+    }
+
+    accelx = parseFloat(generateRandom(-0.1, 0.1));
+    accely = parseFloat(generateRandom(-0.1, 0.1));
+    gyrox = parseFloat(generateRandom(-10, 10));
+    gyroy = parseFloat(generateRandom(-10, 10));
+    gyroz = parseFloat(generateRandom(-10, 10));
+    magx = parseFloat(generateRandom(0, 360));
+    magy = parseFloat(generateRandom(-10, 10));
+    magz = parseFloat(generateRandom(-10, 10));
+
     const primaryData = [
-        generateRandom(0, 20), // speed (km/h)
-        generateRandom(-2, 2), // accelx (g)
-        generateRandom(-2, 2), // accely
-        generateRandom(-2, 2), // accelz
-        generateRandom(-180, 180), // gyrox (°/s)
-        generateRandom(-180, 180), // gyroy
-        generateRandom(-180, 180), // gyroz
-        generateRandom(-100, 100), // magx (μT)
-        generateRandom(-100, 100), // magy
-        generateRandom(-100, 100), // magz
-        generateRandom(0, 1000), // altitude (m)
-        generateRandom(19.5, 19.7), // latitude
-        generateRandom(-99.2, -99.0), // longitude
-        Math.random() > 0.9 ? 'true' : 'false' // decoupling_status
+        speed, accelx, accely, accelz, gyrox, gyroy, gyroz, magx, magy, magz, altitude,
+        latitude, longitude, simTime > 10 ? 'true' : 'false'
     ].join(',');
 
     const secondaryData = [
-        generateRandom(15, 35), // temperature (°C)
-        generateRandom(-2, 2), // accelx (g)
-        generateRandom(-2, 2), // accely
-        generateRandom(-2, 2), // accelz
-        generateRandom(-180, 180), // gyrox (°/s)
-        generateRandom(-180, 180), // gyroy
-        generateRandom(-180, 180), // gyroz
-        generateRandom(20, 80), // humidity (%)
-        generateRandom(95000, 105000), // pressure (Pa)
-        generateRandom(0, 1000), // altitude (m)
-        generateRandom(19.5, 19.7), // latitude
-        generateRandom(-99.2, -99.0) // longitude
+        generateRandom(15, 35), accelx, accely, accelz, gyrox, gyroy, gyroz,
+        generateRandom(20, 80), generateRandom(95000, 105000), altitude,
+        latitude + 0.0001, longitude + 0.0001
     ].join(',');
 
     processPrimaryData(primaryData);
@@ -306,9 +512,6 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
     return R * c;
 }
 
-let lastPrimaryPosition = null;
-let lastSecondaryPosition = null;
-
 function processPrimaryData(data) {
     const parts = data.split(',');
     if (parts.length !== 14) {
@@ -322,11 +525,23 @@ function processPrimaryData(data) {
         return;
     }
 
+    const [speed, accelx, accely, accelz, gyrox, gyroy, gyroz, magx, magy, magz, altitude, latitude, longitude] = numericValues;
     const decoupling_status = parts[13].trim();
+
+    const ACCEL_MAX = 4;
+    if (Math.abs(accelx) > ACCEL_MAX || Math.abs(accely) > ACCEL_MAX || Math.abs(accelz) > ACCEL_MAX) {
+        console.warn(`❌ Primaria: Aceleración fuera de rango: (${accelx}, ${accely}, ${accelz})`);
+        return;
+    }
+
     const currentTime = new Date();
     const timeString = currentTime.toLocaleTimeString('fr-FR', { timeZone: 'Europe/Paris', hour12: false });
-    const [speed, accelx, accely, accelz, gyrox, gyroy, gyroz, magx, magy, magz, altitude, latitude, longitude] = numericValues;
-    const decouplingStatus = decoupling_status === 'true';
+
+    calibrateAccelerometer(accelx, accely, accelz, true);
+
+    const correctedAccelx = accelx - accelBiasPrimary.x;
+    const correctedAccely = accely - accelBiasPrimary.y;
+    const correctedAccelz = accelz - accelBiasPrimary.z;
 
     let velocity = 0;
     if (lastPrimaryPosition) {
@@ -336,34 +551,51 @@ function processPrimaryData(data) {
             latitude,
             longitude
         );
-        velocity = dist / 0.5;
+        const deltaTime = lastPrimaryTime ? Math.min((currentTime - lastPrimaryTime) / 1000, 1) : 0.5;
+        velocity = deltaTime > 0 ? dist / deltaTime : 0;
     }
 
     const GRAVITY = 9.81;
     let relativeAltitude = 0;
     let velocityZ = 0;
-    if (!isNaN(altitude)) {
+    if (!isNaN(altitude) && !isNaN(correctedAccelx) && !isNaN(correctedAccely) && !isNaN(correctedAccelz)) {
         if (!primaryKalman) {
             primaryKalman = new KalmanFilter();
+            primaryOrientation = Quaternion.fromAccelAndMag(correctedAccelx, correctedAccely, correctedAccelz, magx);
         }
-        const deltaTime = lastPrimaryTime ? (currentTime - lastPrimaryTime) / 1000 : 0.5;
-        if (deltaTime > 0 && deltaTime < 1) {
-            const accelZNet = accelz * GRAVITY - GRAVITY;
+        const deltaTime = lastPrimaryTime ? Math.min((currentTime - lastPrimaryTime) / 1000, 0.5) : 0.1;
+        if (deltaTime > 0 && deltaTime <= 0.5) {
+            primaryOrientation = primaryOrientation.update(gyrox, gyroy, gyroz, deltaTime);
+            primaryOrientation = primaryOrientation.correctYaw(magx);
+            primaryOrientation = primaryOrientation.correctOrientation(correctedAccelx, correctedAccely, correctedAccelz, magy, magz);
+
+            const accelVector = [correctedAccelx * GRAVITY, correctedAccely * GRAVITY, correctedAccelz * GRAVITY];
+            const rotatedAccel = primaryOrientation.rotateVector(accelVector);
+            const accelZNet = rotatedAccel[2] - GRAVITY;
+
             primaryKalman.predict(accelZNet, deltaTime);
             primaryKalman.update(altitude);
             const state = primaryKalman.getState();
             relativeAltitude = state.relativeAltitude;
             velocityZ = state.velocityZ;
-            const accelTotal = Math.sqrt(accelx * accelx + accely * accely + accelz * accelz);
-            if (Math.abs(accelTotal - 1) < 0.05 && Math.abs(velocityZ) < 0.1 && Math.abs(altitude) < 10) {
+
+            const accelTotal = Math.sqrt(correctedAccelx * correctedAccelx + correctedAccely * correctedAccely + correctedAccelz * correctedAccelz);
+            if (Math.abs(accelTotal - 1) < 0.1 && Math.abs(velocityZ) < 0.1 && Math.abs(altitude) < 10) {
                 relativeAltitude = 0;
                 velocityZ = 0;
-                primaryKalman.x = [0, 0];
-                primaryKalman.P = [[1000, 0], [0, 1000]];
+                primaryKalman.reset();
+                primaryOrientation = Quaternion.fromAccelAndMag(correctedAccelx, correctedAccely, correctedAccelz, magx);
             }
+            lastPrimaryUpdateTime = currentTime;
         }
     } else {
-        console.warn('Altura absoluta inválida, omitiendo filtro de Kalman');
+        console.warn('Datos inválidos (altura o aceleración), omitiendo filtro de Kalman');
+    }
+
+    if (lastPrimaryUpdateTime && (currentTime - lastPrimaryUpdateTime) / 1000 > 10) {
+        primaryKalman.reset();
+        primaryOrientation = Quaternion.fromAccelAndMag(correctedAccelx, correctedAccely, correctedAccelz, magx);
+        console.warn('Filtro de Kalman y orientación primaria reiniciados por falta de datos válidos');
     }
 
     lastPrimaryTime = currentTime;
@@ -371,14 +603,14 @@ function processPrimaryData(data) {
 
     const primaryData = {
         time: timeString,
-        speed: (speed / 3.6).toFixed(2), //km/h a m/s
-        accelx: accelx.toFixed(2),
-        accely: accely.toFixed(2),
-        accelz: accelz.toFixed(2),
-        atotal: Math.sqrt(accelx * accelx + accely * accely + accelz * accelz).toFixed(2),
-        gyrox: (gyrox * 0.0174533).toFixed(2), //°/s a rad/s
-        gyroy: (gyroy * 0.0174533).toFixed(2),
-        gyroz: (gyroz * 0.0174533).toFixed(2),
+        speed: (speed / 3.6).toFixed(2),
+        accelx: correctedAccelx.toFixed(2),
+        accely: correctedAccely.toFixed(2),
+        accelz: correctedAccelz.toFixed(2),
+        atotal: Math.sqrt(correctedAccelx * correctedAccelx + correctedAccely * correctedAccely + correctedAccelz * correctedAccelz).toFixed(2),
+        gyrox: gyrox.toFixed(2),
+        gyroy: gyroy.toFixed(2),
+        gyroz: gyroz.toFixed(2),
         magx: magx.toFixed(2),
         magy: magy.toFixed(2),
         magz: magz.toFixed(2),
@@ -388,7 +620,7 @@ function processPrimaryData(data) {
         velocity: velocity.toFixed(2),
         velocityZ: velocityZ.toFixed(2),
         relativeAltitude: relativeAltitude.toFixed(2),
-        decouplingStatus: decouplingStatus
+        decouplingStatus: decoupling_status === 'true'
     };
 
     primaryDataLog.push(primaryData);
@@ -411,9 +643,22 @@ function processSecondaryData(data) {
         return;
     }
 
+    const [temperature, accelx, accely, accelz, gyrox, gyroy, gyroz, humidity, pressure, altitude, latitude, longitude] = values;
+
+    const ACCEL_MAX = 4;
+    if (Math.abs(accelx) > ACCEL_MAX || Math.abs(accely) > ACCEL_MAX || Math.abs(accelz) > ACCEL_MAX) {
+        console.warn(`❌ Secundaria: Aceleración fuera de rango: (${accelx}, ${accely}, ${accelz})`);
+        return;
+    }
+
     const currentTime = new Date();
     const timeString = currentTime.toLocaleTimeString('fr-FR', { timeZone: 'Europe/Paris', hour12: false });
-    const [temperature, accelx, accely, accelz, gyrox, gyroy, gyroz, humidity, pressure, altitude, latitude, longitude] = values;
+
+    calibrateAccelerometer(accelx, accely, accelz, false);
+
+    const correctedAccelx = accelx - accelBiasSecondary.x;
+    const correctedAccely = accely - accelBiasSecondary.y;
+    const correctedAccelz = accelz - accelBiasSecondary.z;
 
     let velocity = 0;
     if (lastSecondaryPosition) {
@@ -423,35 +668,73 @@ function processSecondaryData(data) {
             latitude,
             longitude
         );
-        velocity = dist / 0.5;
+        const deltaTime = lastSecondaryTime ? Math.min((currentTime - lastSecondaryTime) / 1000, 1) : 0.5;
+        velocity = deltaTime > 0 ? dist / deltaTime : 0;
     }
 
     const GRAVITY = 9.81;
     let relativeAltitude = 0;
     let velocityZ = 0;
-    if (!isNaN(altitude)) {
+    if (!isNaN(altitude) && !isNaN(correctedAccelx) && !isNaN(correctedAccely) && !isNaN(correctedAccelz)) {
         if (!secondaryKalman) {
             secondaryKalman = new KalmanFilter();
+            secondaryOrientation = Quaternion.fromAccel(correctedAccelx, correctedAccely, correctedAccelz);
         }
-        const deltaTime = lastSecondaryTime ? (currentTime - lastSecondaryTime) / 1000 : 0.5;
-        if (deltaTime > 0 && deltaTime < 1) {
-            const accelZNet = accelz * GRAVITY - GRAVITY;
+        const deltaTime = lastSecondaryTime ? Math.min((currentTime - lastSecondaryTime) / 1000, 0.5) : 0.1;
+        if (deltaTime > 0 && deltaTime <= 0.5) {
+            secondaryOrientation = secondaryOrientation.update(gyrox, gyroy, gyroz, deltaTime);
+            secondaryOrientation = secondaryOrientation.correctOrientation(correctedAccelx, correctedAccely, correctedAccelz, null, null);
+
+            const accelVector = [correctedAccelx * GRAVITY, correctedAccely * GRAVITY, correctedAccelz * GRAVITY];
+            const rotatedAccel = secondaryOrientation.rotateVector(accelVector);
+            let accelZNet = rotatedAccel[2] - GRAVITY;
+
+            const ACCELZNET_THRESHOLD = 0.02; // Reducir el umbral para ser más estricto
+            if (Math.abs(accelZNet) < ACCELZNET_THRESHOLD) {
+                accelZNet = 0;
+            }
+
             secondaryKalman.predict(accelZNet, deltaTime);
-            secondaryKalman.update(altitude);
+            const ALTITUDE_MAX = 2000;
+            if (altitude >= 0 && altitude <= ALTITUDE_MAX) {
+                secondaryKalman.update(altitude);
+            } else {
+                console.warn(`Altitud secundaria inválida: ${altitude}, omitiendo actualización de Kalman`);
+            }
+
             const state = secondaryKalman.getState();
             relativeAltitude = state.relativeAltitude;
             velocityZ = state.velocityZ;
 
-            const accelTotal = Math.sqrt(accelx * accelx + accely * accely + accelz * accelz);
-            if (Math.abs(accelTotal - 1) < 0.05 && Math.abs(velocityZ) < 0.1 && Math.abs(altitude) < 10) {
+            // Ajustar la condición de reposo
+            const accelTotal = Math.sqrt(correctedAccelx * correctedAccelx + correctedAccely * correctedAccely + correctedAccelz * correctedAccelz);
+            const gyroTotal = Math.sqrt(gyrox * gyrox + gyroy * gyroy + gyroz * gyroz);
+            if (Math.abs(accelTotal - 1) < 0.15 && Math.abs(velocityZ) < 0.1 && Math.abs(altitude) < 10 && gyroTotal < 5) {
                 relativeAltitude = 0;
                 velocityZ = 0;
-                secondaryKalman.x = [0, 0];
-                secondaryKalman.P = [[1000, 0], [0, 1000]];
+                secondaryKalman.reset();
+                secondaryOrientation = Quaternion.fromAccel(correctedAccelx, correctedAccely, correctedAccelz);
+                console.log('Filtro de Kalman secundario reseteado: reposo detectado');
             }
+            lastSecondaryUpdateTime = currentTime;
         }
     } else {
-        console.warn('Altura absoluta inválida, omitiendo filtro de Kalman');
+        console.warn('Datos inválidos (altura o aceleración), omitiendo filtro de Kalman');
+    }
+
+    // Reiniciar si la altura relativa diverge demasiado y la altura absoluta está cerca de cero
+    if (altitude < 10 && relativeAltitude < -10) {
+        relativeAltitude = 0;
+        velocityZ = 0;
+        secondaryKalman.reset();
+        secondaryOrientation = Quaternion.fromAccel(correctedAccelx, correctedAccely, correctedAccelz);
+        console.log('Filtro de Kalman secundario reseteado: deriva negativa detectada');
+    }
+
+    if (lastSecondaryUpdateTime && (currentTime - lastSecondaryUpdateTime) / 1000 > 10) {
+        secondaryKalman.reset();
+        secondaryOrientation = Quaternion.fromAccel(correctedAccelx, correctedAccely, correctedAccelz);
+        console.warn('Filtro de Kalman y orientación secundaria reiniciados por falta de datos válidos');
     }
 
     lastSecondaryTime = currentTime;
@@ -460,13 +743,13 @@ function processSecondaryData(data) {
     const secondaryData = {
         time: timeString,
         temperature: temperature.toFixed(2),
-        accelx: accelx.toFixed(2),
-        accely: accely.toFixed(2),
-        accelz: accelz.toFixed(2),
-        atotal: Math.sqrt(accelx * accelx + accely * accely + accelz * accelz).toFixed(2),
-        gyrox: (gyrox * 0.0174533).toFixed(2),
-        gyroy: (gyroy * 0.0174533).toFixed(2),
-        gyroz: (gyroz * 0.0174533).toFixed(2),
+        accelx: correctedAccelx.toFixed(2),
+        accely: correctedAccely.toFixed(2),
+        accelz: correctedAccelz.toFixed(2),
+        atotal: Math.sqrt(correctedAccelx * correctedAccelx + correctedAccely * correctedAccely + correctedAccelz * correctedAccelz).toFixed(2),
+        gyrox: gyrox.toFixed(2),
+        gyroy: gyroy.toFixed(2),
+        gyroz: gyroz.toFixed(2),
         humidity: humidity.toFixed(2),
         pressure: (pressure / 100).toFixed(2),
         altitude: altitude.toFixed(2),
@@ -485,17 +768,17 @@ function processSecondaryData(data) {
 }
 
 function updateDistance() {
-  if (lastPrimaryPosition && lastSecondaryPosition) {
-    const currentTime = new Date().toLocaleTimeString('fr-FR', { timeZone: 'Europe/Paris', hour12: false });
-    const distance = calculateDistance(
-      lastPrimaryPosition.latitude,
-      lastPrimaryPosition.longitude,
-      lastSecondaryPosition.latitude,
-      lastSecondaryPosition.longitude
-    );
-    dashboardWindow.webContents.send('distance-data', { time: currentTime, distance: distance.toFixed(2) });
-    distanceDataLog.push({ time: currentTime, distance: distance.toFixed(2) });
-  }
+    if (lastPrimaryPosition && lastSecondaryPosition) {
+        const currentTime = new Date().toLocaleTimeString('fr-FR', { timeZone: 'Europe/Paris', hour12: false });
+        const distance = calculateDistance(
+            lastPrimaryPosition.latitude,
+            lastPrimaryPosition.longitude,
+            lastSecondaryPosition.latitude,
+            lastSecondaryPosition.longitude
+        );
+        dashboardWindow.webContents.send('distance-data', { time: currentTime, distance: distance.toFixed(2) });
+        distanceDataLog.push({ time: currentTime, distance: distance.toFixed(2) });
+    }
 }
 
 ipcMain.on('generate-report', () => {
@@ -515,7 +798,7 @@ ipcMain.on('generate-report', () => {
         'Velocidad del viento (m/s) Primaria',
         'Aceleración X (g) Primaria', 'Aceleración Y (g) Primaria', 'Aceleración Z (g) Primaria', 'Aceleración Total (g) Primaria',
         'Giroscopio X (°/s) Primaria', 'Giroscopio Y (°/s) Primaria', 'Giroscopio Z (°/s) Primaria',
-        'Magnetómetro X (μT) Primaria', 'Magnetómetro Y (μT) Primaria', 'Magnetómetro Z (μT) Primaria',
+        'Magnetómetro Yaw (°) Primaria', 'Magnetómetro Pitch (°) Primaria', 'Magnetómetro Roll (°) Primaria',
         'Altitud (m) Primaria', 'Altitud Alternativa (m) Primaria', 'Latitud Primaria', 'Longitud Primaria', 'Velocidad (m/s) Primaria',
         'Temperatura (°C) Secundaria', 'Aceleración X (g) Secundaria', 'Aceleración Y (g) Secundaria', 'Aceleración Z (g) Secundaria', 'Aceleración Total (g) Secundaria',
         'Giroscopio X (°/s) Secundaria', 'Giroscopio Y (°/s) Secundaria', 'Giroscopio Z (°/s) Secundaria',
@@ -671,10 +954,10 @@ ipcMain.on('generate-report', () => {
     txtContent += `   - Y Promedio: ${primaryStats.gyroy.avg.toFixed(2)}\n`;
     txtContent += `   - Z Promedio: ${primaryStats.gyroz.avg.toFixed(2)}\n\n`;
 
-    txtContent += '4. Magnetómetro (μT):\n';
-    txtContent += `   - X Promedio: ${primaryStats.magx.avg.toFixed(2)}\n`;
-    txtContent += `   - Y Promedio: ${primaryStats.magy.avg.toFixed(2)}\n`;
-    txtContent += `   - Z Promedio: ${primaryStats.magz.avg.toFixed(2)}\n\n`;
+    txtContent += '4. Magnetómetro (°):\n';
+    txtContent += `   - Yaw Promedio: ${primaryStats.magx.avg.toFixed(2)}\n`;
+    txtContent += `   - Pitch Promedio: ${primaryStats.magy.avg.toFixed(2)}\n`;
+    txtContent += `   - Roll Promedio: ${primaryStats.magz.avg.toFixed(2)}\n\n`;
 
     txtContent += '5. Altitud (m):\n';
     txtContent += `   - Promedio: ${primaryStats.altitude.avg.toFixed(2)}\n`;
